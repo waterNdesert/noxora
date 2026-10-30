@@ -6,7 +6,7 @@ Nexora is an independent AI knowledge assistant project. Its approved product an
 
 - [`architecture/`](architecture/) — Nexora product architecture, approved stack and decisions, database proposal, MVP scope, and architecture validation.
 - [`development/`](development/) — development guidelines and the single current roadmap.
-- [`sprints/`](sprints/) — sprint-specific plans. The Sprint 1 plan is not a declaration that implementation has started.
+- [`sprints/`](sprints/) — sprint-specific plans, including the active Sprint 1 foundation implementation.
 - [`archive/onyx-reference/`](archive/onyx-reference/) — preserved research about the separate Onyx product. These documents describe Onyx and are not Nexora requirements.
 
 ## Authoritative Nexora documents

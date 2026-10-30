@@ -1,24 +1,20 @@
 # Target Project Directory Structure
 
-This document outlines the organized monorepo directory layout for the application, featuring a decoupled **Search Provider** interface powered initially by **PostgreSQL + `pgvector`**.
+This document describes Nexora's implementation layout. Sprint 1 establishes the minimal backend, web, migration, test, and local-development files; the later-phase directories below are architectural destinations, not Sprint 1 work. The initial search provider is PostgreSQL + `pgvector` + PostgreSQL FTS behind the `SearchProvider` contract.
 
 ---
 
 ## 1. Monorepo Root Layout
 
 ```
-knowledge-platform/
-├── backend/                  # Python FastAPI Backend, Celery Workers, Models
+nexora/
+├── backend/                  # backend/pyproject.toml, FastAPI source, Alembic, and tests
 ├── web/                      # Next.js 16 (React 19) Web Application
-├── services/                 # Auxiliary Microservices (Model Server, Sandbox)
-├── shared/                   # Cross-cutting types and API contracts
-├── deployment/               # Docker, Kubernetes Helm, Reverse Proxy configs
-├── scripts/                  # Developer utilities and database seeding tools
-├── .github/                  # CI/CD Workflows (Lint, Test, Docker Build)
-├── docker-compose.yml        # Local development manifest (Postgres+pgvector, Redis, Web, API)
-├── Makefile                  # Developer CLI commands (build, run, test, migrate)
-├── pyproject.toml            # Python dependencies (managed via uv)
-└── package.json              # Monorepo and frontend tooling scripts
+├── deployment/nginx/         # Same-origin Nginx routing configuration
+├── .github/                  # Repository-specific Copilot instructions
+├── docker-compose.yml        # PostgreSQL 16+ with pgvector only in Sprint 1
+├── .env.example              # Local configuration template; never commit .env
+└── web/package.json          # Next.js application and frontend tooling scripts
 ```
 
 ---
@@ -35,10 +31,10 @@ backend/
 │   ├── main.py               # FastAPI application entry point & lifespan manager
 │   │
 │   ├── api/                  # Presentation Layer: HTTP Routers & Middleware
-│   │   ├── dependencies/     # FastAPI Depends: db session, current_user, tenant_context
-│   │   ├── middleware/       # Latency logging, rate limiting, request ID, CORS
+│   │   ├── dependencies/     # Database session and authenticated-user dependencies
+│   │   ├── middleware/       # Same-origin Origin checks; add middleware only as required
 │   │   ├── routers/          # REST Endpoint Controllers
-│   │   │   ├── auth.py       # Login, register, logout, OAuth2, SAML ACS
+│   │   │   ├── auth.py       # Local login/logout; OAuth is a later sprint
 │   │   │   ├── chat.py       # Conversations, message history, SSE stream endpoint
 │   │   │   ├── search.py     # Hybrid search query, intent evaluation, document sets
 │   │   │   ├── connectors.py # Connector definitions, credential pairing, sync triggers
@@ -50,9 +46,8 @@ backend/
 │   │
 │   ├── core/                 # Foundation: Settings, Security, Database Engines
 │   │   ├── config.py         # Pydantic Settings (loads environment variables)
-│   │   ├── database.py       # SQLAlchemy engine, connection pools (psycopg2 & asyncpg)
-│   │   ├── redis.py          # Redis connection pool, distributed locks, rate limiters
-│   │   └── security.py       # JWT creation/verification, password hashing, AES-GCM 256
+│   │   ├── database.py       # Async request engine (asyncpg); psycopg3 for Alembic
+│   │   └── security.py       # Argon2id password hashing and session-token digests
 │   │
 │   ├── domain/               # Domain Entities, Interfaces & Core Business Rules
 │   │   ├── exceptions.py     # Standardized domain error classes and error codes
@@ -60,7 +55,7 @@ backend/
 │   │   └── interfaces/       # Abstract repository and external gateway contracts
 │   │
 │   ├── services/             # Application Services: Orchestrates Business Workflows
-│   │   ├── auth_service.py   # User verification, token refreshing, invite workflows
+│   │   ├── auth_service.py   # Local credential verification and session workflows
 │   │   ├── chat_service.py   # Prompt assembly, conversational state, SSE event dispatch
 │   │   ├── search_service.py # Hybrid search coordination, RRF fusion, reranking
 │   │   ├── indexing_service.py # Ingestion coordination, document state tracking
@@ -88,7 +83,7 @@ backend/
 │   │   │   ├── provider.py   # PgVectorSearchProvider (implements SearchProvider)
 │   │   │   ├── fts_builder.py# tsvector full-text query builder & ts_rank_cd scoring
 │   │   │   └── rrf.py        # SQL Common Table Expression (CTE) Reciprocal Rank Fusion
-│   │   ├── opensearch/       # Future OpenSearch Provider (implements SearchProvider)
+│   │   ├── opensearch/       # Possible future provider; not an MVP dependency
 │   │   │   └── provider.py   # OpenSearchSearchProvider
 │   │   ├── qdrant/           # Future Qdrant Provider (implements SearchProvider)
 │   │   │   └── provider.py   # QdrantSearchProvider
@@ -133,9 +128,9 @@ web/
 ├── public/                   # Static assets (favicons, logos, illustrations)
 ├── src/
 │   ├── app/                  # Next.js App Router Pages & Layouts
-│   │   ├── layout.tsx        # Root HTML layout with providers (Theme, Auth, Query)
-│   │   ├── page.tsx          # Marketing landing page or redirect to /app
-│   │   ├── (auth)/           # Authentication Route Group (login, signup, sso)
+│   │       ├── layout.tsx        # Root HTML layout
+│   │       ├── page.tsx          # Authenticated session summary and sign-in link
+│   │       ├── (auth)/           # Local login; OAuth is a later sprint
 │   │   ├── (chat)/           # Core Conversational Experience (/app, /search)
 │   │   └── (admin)/          # Administration & Settings Console
 │   ├── components/           # Reusable UI Component Library (Radix primitives, chat, search)

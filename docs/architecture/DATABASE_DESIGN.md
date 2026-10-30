@@ -1,6 +1,6 @@
 # Initial Database Architecture & Entity Design
 
-This document details the relational database schema, core entities, foreign key relationships, multi-tenant partitioning boundaries, and the **unified PostgreSQL 16+ hybrid search schema using `pgvector` and Full-Text Search (FTS)**.
+This document records a proposed relational model for the single-tenant MVP and the approved **PostgreSQL 16+ hybrid search direction using `pgvector` and Full-Text Search (FTS)**. The examples are design material, not migrations or an approved complete schema.
 
 **Approved initial search architecture:** PostgreSQL 16+ with `pgvector` and PostgreSQL Full-Text Search (FTS), accessed through the `SearchProvider` contract. OpenSearch and Qdrant are possible future providers only; they are not part of the approved implementation.
 
@@ -40,9 +40,9 @@ erDiagram
 
 ## 2. Foundational Relational Entities
 
-### A. Extensions & Multi-Tenancy
+### A. Extensions & Tenant-Aware Data Shape
 
-Tenant-scoped reads and writes must enforce tenant identity in application queries and must not leak tenant context across pooled connections. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before tenant isolation is implemented.
+The MVP is a single-tenant deployment. Tenant context is selected and enforced server-side; clients cannot choose or override it. Tenant identifiers in this proposed schema are for data-model continuity and do not provide isolation by themselves. Do not implement or claim RLS until its complete policy, transaction-bound context-setting mechanism, connection-pool reset strategy, and security tests are approved.
 
 ```sql
 -- Enable vector search extension
@@ -60,7 +60,7 @@ CREATE TABLE tenants (
 
 CREATE TABLE tenant_settings (
     tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
-    allowed_auth_types JSONB NOT NULL DEFAULT '["local", "google"]',
+    allowed_auth_types JSONB NOT NULL DEFAULT '["local", "google", "github"]',
     default_model VARCHAR(128) NOT NULL DEFAULT 'gpt-4o',
     branding_logo_url TEXT,
     primary_color_hex VARCHAR(7) DEFAULT '#3b82f6',
@@ -72,6 +72,11 @@ CREATE TABLE tenant_settings (
 ---
 
 ### B. Identity, Users & Roles
+
+The approved browser authentication model uses opaque server-side sessions. Local passwords are hashed with Argon2id. The initial administrator is created through a one-time setup command. Sprint 1 must add session persistence that supports lookup by the stored token digest, association to a user, expiration, and invalidation; store only the digest, never the browser token. Sessions use a 30-minute sliding idle timeout and a 12-hour absolute lifetime; activity never extends the absolute expiry. Expired sessions are invalidated server-side, and logout immediately invalidates the session. Provider API keys are not stored until their configuration and secure-storage approach are approved.
+
+The public-registration versus administrator-managed account-provisioning policy and password reset flow remain open. Do not infer open registration from the example user table.
+
 ```sql
 CREATE TYPE user_role AS ENUM ('admin', 'global_curator', 'curator', 'basic');
 
@@ -116,6 +121,10 @@ CREATE TABLE api_keys (
 );
 ```
 
+`api_keys` represents Nexora-issued API credentials in this proposal; it is not a design for storing OpenAI, Anthropic, or other provider API keys.
+
+The Sprint 1 session record should include a user foreign key, a unique digest of the opaque session token, a digest of the session's CSRF token, creation and last-seen timestamps, idle and absolute expiry timestamps, and a nullable revocation timestamp. Session lookup must never require storing the browser token in plaintext. Password-change/reset and account-disable flows must invalidate affected sessions when those flows are implemented.
+
 ---
 
 ### C. Connectors & Ingestion Pipeline
@@ -132,6 +141,7 @@ CREATE TABLE connectors (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Connector credentials only. This is not a provider API-key storage design.
 CREATE TABLE credentials (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -191,12 +201,10 @@ CREATE TABLE document_chunks (
     tsv_content TSVECTOR GENERATED ALWAYS AS (
         to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, ''))
     ) STORED,
-    -- Dense Vector Embedding (e.g. 1024-dim BGE-large or 1536-dim OpenAI)
-    -- OPEN DECISION: embedding model/dimension unresolved; VECTOR(1024) is illustrative only.
-    embedding VECTOR(1024),
+    -- Embedding column omitted until provider, model, dimension, and versioning are approved.
     source_type VARCHAR(64) NOT NULL,
     source_url TEXT,
-    -- Access Control List array (allowed emails, group IDs, or 'public')
+    -- Proposed ACL representation only; canonical authorization model remains unresolved.
     access_control_list TEXT[] NOT NULL DEFAULT '{}',
     metadata_json JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -359,9 +367,11 @@ CREATE TABLE audit_logs (
 
 ## 3. High-Performance Indexing & Hybrid Search Query
 
-### A. Indexing Strategy
+### A. Candidate Indexing Strategy
+The HNSW example below is not part of the current proposed schema and must not be applied until the embedding provider, model, dimension, versioning, and index settings are approved. FTS and ACL index choices also require validation against the final query and authorization model.
+
 ```sql
--- 1. pgvector HNSW Index for Fast Cosine Vector Similarity
+-- Candidate only; requires an approved embedding column and dimension.
 CREATE INDEX idx_document_chunks_embedding ON document_chunks 
 USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
@@ -382,8 +392,8 @@ CREATE INDEX idx_llm_usage_tenant_time ON llm_usage(tenant_id, created_at DESC);
 
 ---
 
-### B. The Unified PostgreSQL Hybrid Search Query (with RRF)
-The following SQL Common Table Expression (CTE) executes the complete hybrid search pipeline in a single round-trip:
+### B. The Proposed PostgreSQL Hybrid Search Query (with RRF)
+The following illustrative SQL Common Table Expression (CTE) shows the approved retrieval direction. It is not executable until an embedding model/dimension and canonical ACL representation are selected. PostgreSQL FTS ranking with `ts_rank_cd` is not BM25. Index and query settings require evaluation.
 
 ```sql
 WITH vector_matches AS (

@@ -8,41 +8,43 @@ This document records the foundational architectural decisions, rationale, alter
 
 ### Status: Accepted (Supersedes OpenSearch-mandatory design)
 ### Context:
-Enterprise workplace search requires retrieving documents through both semantic intent (conceptual synonyms) and exact keyword matches (acronyms, code identifiers, employee names, exact error codes), while enforcing strict tenant and user access control lists (ACLs). Requiring OpenSearch for initial deployment adds severe operational overhead: a dedicated Java Virtual Machine (JVM) cluster (4–8 GB heap), circuit breaker tuning, separate backups, and dual-database eventual consistency lag.
+Enterprise workplace search requires retrieving documents through both semantic intent (conceptual synonyms) and exact keyword matches (acronyms, code identifiers, employee names, exact error codes), while enforcing user access controls. Requiring OpenSearch for initial deployment adds operational overhead and a separate search data store.
 
 ### Decision:
 **Approved initial search architecture:** PostgreSQL 16+ with `pgvector` and PostgreSQL Full-Text Search (FTS), accessed through the `SearchProvider` contract. OpenSearch and Qdrant are possible future providers only; they are not part of the approved implementation.
 
 1. Deploy **PostgreSQL 16+ with the `pgvector` extension and Full-Text Search (FTS)** as the unified data store for both relational metadata and hybrid search.
 2. Abstract all search, indexing, and deletion operations behind an abstract **`SearchProvider`** interface, with **`PgVectorSearchProvider`** as the default implementation.
-3. Use HNSW indexing on vector embeddings (`vector_cosine_ops`) and GIN indexing on generated `tsvector` columns, combining rankings via **Reciprocal Rank Fusion (RRF)** in a single SQL query.
+3. Use PostgreSQL full-text ranking and pgvector ranking, combining result ranks with **Reciprocal Rank Fusion (RRF)**. HNSW and GIN are the intended index types; production settings remain subject to retrieval evaluation.
 
 ### Alternatives Considered:
-1. *Mandatory OpenSearch 2.x*: Powerful for 10M+ chunks, but excessive complexity for initial development, MVP, and deployments under 2M chunks.
-2. *Pure Vector Databases (Pinecone, Qdrant, Milvus)*: Excellent vector search, but lack full-text BM25 tokenizers, requiring a dual-database setup and complex sync logic.
+1. *Mandatory OpenSearch 2.x*: Powerful for large-scale search, but excessive complexity for initial development and the MVP.
+2. *Pure Vector Databases (Pinecone, Qdrant, Milvus)*: Excellent vector search, but require a separate keyword-search path and data synchronization.
 
 ### Consequences:
-- **Positive**: Single database for relational data, vectors, and full-text search. Eliminates an entire distributed cluster, cuts infrastructure RAM requirements by > 50%, guarantees zero data drift, and enables single-command backups (`pg_dump` / WAL-G).
-- **Negative**: HNSW indices must fit in RAM. As corpus grows beyond 2–3 million chunks, vector queries may contend with relational queries for buffer cache.
+- **Positive**: One database can hold relational data and search data; updates can be atomic when source records and derived search data are committed in the same transaction.
+- **Negative**: Vector indexes and relational workloads compete for resources. Performance and scale limits require measurement; no corpus threshold is guaranteed by this decision.
 
 ---
 
-## ADR-002: Direct Reverse-Proxy Routing for Streaming Chat
+## ADR-002: Same-Origin Reverse-Proxy Routing and Browser Sessions
 
 ### Status: Accepted
 ### Context:
-In Onyx, the browser routes chat requests to Next.js (`/api/[...path]`), which acts as an HTTP proxy forwarding requests to FastAPI. During long Server-Sent Events (SSE) streaming turns, Node.js holds open duplex streams, causing high memory usage under concurrent load.
+The browser application uses cookie-based authentication. Routing API requests through a different origin complicates cookie and CSRF handling; routing streaming requests through Next.js also adds a proxy hop.
 
 ### Decision:
-Configure the edge reverse proxy (Traefik / Nginx) to route `/api/*` requests **directly to FastAPI**, while routing static assets and SSR pages to Next.js.
+Use **opaque server-side sessions** for the first-party browser application. Route browser `/api/*` requests through the same-origin **Nginx** reverse proxy directly to FastAPI, and route frontend pages and assets to Next.js. Protect state-changing cookie-authenticated requests with CSRF protections and Origin validation. Use HTTP-only, production Secure, SameSite=Lax, Path=/, host-only session cookies.
+
+Sessions have a **30-minute sliding idle timeout** and a **12-hour absolute lifetime**. Activity may extend the idle expiry but never the absolute expiry. Expired sessions are invalidated server-side and require reauthentication; logout immediately invalidates the session.
 
 ### Alternatives Considered:
-1. *Keep Next.js API Proxy*: Simple development setup, but introduces memory bloat and latency hops in production.
-2. *WebSockets*: Full duplex, but requires persistent socket connections, stateful load balancing, and is more fragile across enterprise corporate proxies than standard HTTP SSE.
+1. *JWT access and refresh tokens*: Viable when explicitly designed, but require refresh rotation, revocation, key rotation, and browser storage policies not needed for this first-party session model.
+2. *Cross-origin API*: Possible, but requires more complex credentialed CORS and cookie security configuration.
 
 ### Consequences:
-- **Positive**: SSE streams pipe directly from FastAPI to the browser with zero intermediate Node.js buffering, cutting memory overhead by > 60%.
-- **Negative**: Requires reverse proxy configuration in both local development and production.
+- **Positive**: One browser origin simplifies cookie handling; SSE streams go directly from FastAPI without a Next.js proxy.
+- **Negative**: Requires the same-origin reverse-proxy route in local development and production, plus CSRF and Origin protections.
 
 ---
 
@@ -72,49 +74,45 @@ Adopt **LiteLLM** as the unified LLM invocation gateway.
 FastAPI request handlers and streaming chat loops benefit immensely from asynchronous non-blocking database queries (`asyncpg`). Conversely, Celery background workers and Alembic migrations operate synchronously and benefit from standard connection pooling (`psycopg2` / `psycopg3`).
 
 ### Decision:
-Implement a dual SQLAlchemy 2.0 engine architecture:
+Use SQLAlchemy 2.0 with:
 - `async_engine` (powered by `asyncpg`) for FastAPI request endpoints.
-- `sync_engine` (powered by `psycopg2`) for Celery workers and Alembic migrations.
+- A synchronous PostgreSQL driver (`psycopg3`) for Alembic migrations. Add a synchronous worker engine only when background workers are introduced.
 
 ### Consequences:
 - **Positive**: Prevents event loop blocking during chat streaming while preserving thread safety in background workers.
 - **Negative**: Requires maintaining async and sync session factory helpers.
 
-Tenant-scoped reads and writes must enforce tenant identity in application queries and must not leak tenant context across pooled connections. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before tenant isolation is implemented.
+The MVP has one server-selected tenant. Tenant IDs do not provide isolation, and RLS is not part of the MVP. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before future tenant isolation is implemented.
 
 ---
 
 ## ADR-005: Context Window Token Budgeting & Chunk Prepending
 
-### Status: Accepted
+### Status: Proposed; evaluate during retrieval implementation
 ### Context:
-When documents are split into 512-token segments, individual chunks lose surrounding context (e.g., a chunk might contain financial numbers without stating which company or quarter they belong to).
+When documents are split into token-bounded segments, individual chunks can lose surrounding context (e.g., a chunk might contain financial numbers without stating which company or quarter they belong to).
 
 ### Decision:
-During chunking, automatically prepend document metadata headers (`Title: {title} | Source: {path} | Section: {header}`) to the raw text before embedding and indexing.
+During chunking, evaluate whether document metadata headers should be prepended to the text before embedding and indexing. This is a proposed retrieval behavior, not an MVP prerequisite.
 
 ### Consequences:
-- **Positive**: Dramatically improves embedding similarity scores and keyword BM25 matches for isolated passages.
-- **Negative**: Consumes ~20–40 tokens per chunk from the total chunk size.
+- **Positive**: May improve retrieval context for isolated passages.
+- **Negative**: Consumes tokens per chunk. Validate the benefit during retrieval evaluation.
 
 ---
 
-## ADR-006: Partitioned Celery Queues for Asynchronous Workloads
+## ADR-006: Asynchronous Document Ingestion
 
-### Status: Accepted
+### Status: Accepted for the upload/ingestion implementation; not a Sprint 1 dependency
 ### Context:
-A large connector crawl (e.g. 50,000 files from Google Drive) can flood task queues, causing high-priority user actions (document uploads, email invites, password resets) to queue behind hours of batch processing.
+Document extraction and embedding can exceed a request's useful processing window and need visible status, failure reporting, and retries.
 
 ### Decision:
-Segment Celery tasks into four isolated queues:
-- `ingestion`: Batch chunking, embedding, vector writes.
-- `connectors`: External API polling with adaptive rate-limiting backoff.
-- `pruning`: Document deletion and garbage collection.
-- `default`: High-priority user actions and notifications.
+Use Celery with Redis for the document-ingestion background workload when document upload is implemented. The pipeline must support upload and job creation, extraction and cleaning, chunking, embedding generation, storage, processing status, failure reporting, and retries. Introduce the worker and broker with that implementation, not in Sprint 1. Additional queue partitioning is deferred until workloads require it.
 
 ### Consequences:
-- **Positive**: Heavy background crawls never delay interactive user operations.
-- **Negative**: Requires configuring worker concurrency per queue in deployment manifests.
+- **Positive**: Long-running ingestion is decoupled from HTTP requests and can report progress and failures.
+- **Negative**: Adds broker, worker, retry, and operational responsibilities when upload is implemented.
 
 ---
 
@@ -122,17 +120,79 @@ Segment Celery tasks into four isolated queues:
 
 ### Status: Accepted
 ### Context:
-While PostgreSQL with `pgvector` is ideal for initial implementation and scales comfortably to 1–3 million chunks, future enterprise growth may eventually justify a dedicated distributed search cluster (e.g., OpenSearch or Qdrant).
+PostgreSQL with `pgvector` is the approved initial search provider. Future workload or language requirements may justify evaluating a dedicated search system (e.g., OpenSearch or Qdrant).
 
 ### Decision:
 1. Treat vector embeddings and `tsvector` columns as **rebuildable derived data**. PostgreSQL remains the single permanent source of truth for raw document text, titles, links, and ACL metadata.
-2. Maintain the `SearchProvider` interface contract so the application can swap search providers by updating `SEARCH_PROVIDER=opensearch` or `SEARCH_PROVIDER=qdrant` in configuration, with zero modifications to chat, RAG, or agent code.
-3. Establish measurable triggers that justify executing a migration:
-   - **Corpus Volume**: Total chunks exceed **3,000,000** on a single node.
-   - **Memory Pressure**: HNSW index size exceeds 70% of available RAM, degrading relational query cache hit rates.
-   - **Latency & Concurrency**: Sustained search load exceeds **50 QPS** with p95 search latency exceeding **300 ms**.
-   - **Linguistic Requirements**: Requirement for specialized language analyzers (e.g. Japanese Kuromoji or CJK n-gram tokenizers) beyond standard PostgreSQL dictionary capabilities.
+2. Maintain the `SearchProvider` interface as a boundary for future search-provider evaluation. A provider migration will still require data export/reindexing, operational work, and security review; it is not a one-setting change.
+3. Use the previously listed corpus, memory, latency, and language thresholds only as evaluation prompts, not approved migration triggers or guarantees. Validate thresholds against measured workloads before making a migration decision.
 
 ### Consequences:
-- **Positive**: Clear, data-driven migration criteria without premature optimization or unnecessary early infrastructure bloat.
+- **Positive**: Avoids premature infrastructure while retaining a review point for measured future needs.
 - **Negative**: Requires maintaining bulk-reindexing scripts to export chunks into OpenSearch/Qdrant if migration occurs.
+
+---
+
+## ADR-008: Local Account Security and Initial Administrator
+
+### Status: Accepted
+
+### Decision:
+- Hash local passwords with Argon2id using library-managed salts and parameters.
+- Store opaque session credentials only as hashes in persistent server-side session records.
+- Use a 30-minute sliding idle timeout and a 12-hour absolute lifetime; the absolute expiry never extends. Expired sessions are invalidated server-side and require reauthentication.
+- Invalidate a session immediately on logout and invalidate affected sessions after password changes/resets or account disablement.
+- Create the initial administrator through a one-time setup command, not a public first-signup race.
+
+The public-registration versus administrator-managed account-provisioning policy and password reset flow remain open and must be decided before implementing those behaviors.
+
+---
+
+## ADR-009: Single-Tenant MVP and Future Tenant-Aware Data Model
+
+### Status: Accepted
+
+### Decision:
+The initial deployment is single-tenant. Tenant context is selected and enforced server-side; clients cannot choose or override it. The data model may retain tenant identifiers to support future evolution, but tenant IDs alone are not an isolation boundary. Do not implement or claim Row-Level Security (RLS) until the full policy, transaction-bound context, connection-pool reset, and security tests are approved.
+
+### Consequences:
+- **Positive**: Keeps the MVP deployment model simple while preserving a tenant-aware data shape.
+- **Negative**: Future multi-tenant enforcement requires a separately reviewed design and migration; the current model does not provide enterprise isolation.
+
+---
+
+## ADR-010: Google and GitHub OAuth in the MVP
+
+### Status: Accepted
+
+### Decision:
+Google and GitHub OAuth remain MVP requirements and are assigned to a dedicated Sprint 5 after the local session foundation. Both flows establish the same opaque server-side session used by local authentication.
+
+Account linking, verified-email handling, and provider identities without a usable email must be decided before implementing OAuth.
+
+---
+
+## ADR-011: Provider API-Key Storage
+
+### Status: Accepted
+
+### Decision:
+Do not persist LLM provider API keys until the configuration path and secure-storage approach are defined and approved. Existing connector-credential encryption proposals do not authorize provider-key persistence.
+
+---
+
+## ADR-012: Embedding Model and Schema
+
+### Status: Accepted
+
+### Decision:
+Select the embedding provider, model, dimension, and versioning strategy before implementing the embedding schema. Any sample dimension or index parameter in research and design material is illustrative, not approved.
+
+---
+
+## ADR-013: Optional Search Reranking
+
+### Status: Accepted
+
+### Decision:
+Keep the retrieval pipeline extensible for a reranking stage. Establish and evaluate the initial PostgreSQL hybrid-retrieval baseline before implementing cross-encoder reranking, unless it is explicitly scheduled based on that evaluation.

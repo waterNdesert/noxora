@@ -1,6 +1,6 @@
 # Production Application Architecture Design
 
-This document specifies the revised production architecture for building an enterprise knowledge intelligence and autonomous AI agent platform. It replaces OpenSearch with a **unified PostgreSQL 16+ engine utilizing `pgvector` and Full-Text Search (FTS)**, behind a decoupled `SearchProvider` interface that ensures a seamless future migration path.
+This document specifies Nexora's approved architecture direction. The initial search design uses a **unified PostgreSQL 16+ engine utilizing `pgvector` and Full-Text Search (FTS)** behind a `SearchProvider` contract. The MVP deployment is single-tenant; the architecture does not claim tenant isolation from tenant identifiers alone.
 
 ---
 
@@ -16,7 +16,7 @@ flowchart TD
     end
 
     subgraph EdgeGateway["Edge & Reverse Proxy Tier"]
-        Traefik["Edge Reverse Proxy & TLS Termination\n(Traefik / Nginx)"]
+        Nginx["Nginx Reverse Proxy & TLS Termination"]
     end
 
     subgraph ApplicationTier["Application & API Tier"]
@@ -26,20 +26,19 @@ flowchart TD
     end
 
     subgraph WorkersTier["Asynchronous Execution & Background Tier"]
-        TaskBroker[("Redis 7+ Task Broker & Locks")]
-        CeleryWorker["Celery Worker Fleet\n(Dedicated Queues: Ingestion, Fetching, Pruning)"]
-        CeleryBeat["Celery Beat Periodic Scheduler"]
+        TaskBroker[("Redis 7+ Task Broker\n(added with document ingestion)")]
+        CeleryWorker["Celery Worker\n(added with document ingestion)"]
+        CeleryBeat["Celery Beat\n(only if later scheduled work needs it)"]
     end
 
     subgraph ModelTier["Model & Inference Tier"]
-        ModelServer["Dedicated Model Server\n(HuggingFace Embeddings & Cross-Encoder)"]
+        ModelServer["Embedding Provider\n(model/provider unresolved;\nreranking optional)"]
         ExternalLLMs["External LLM Gateway\n(OpenAI, Anthropic, Gemini, Bedrock)"]
     end
 
-    subgraph StorageTier["Data & Storage Tier (Single Source of Truth)"]
+    subgraph StorageTier["Data & Storage Tier"]
         Postgres[("PostgreSQL 16+ Database\n- Relational Metadata & Auth\n- Full-Text Search (tsvector GIN)\n- pgvector (HNSW Cosine Distance)")]
         ObjectStore[("S3-Compatible Object Store\n(MinIO / AWS S3 / Cloudflare R2)")]
-        CacheStore[("Redis Cache & Rate Limiting")]
     end
 
     subgraph SandboxTier["Secure Execution Tier"]
@@ -47,10 +46,10 @@ flowchart TD
     end
 
     %% Routing
-    Clients --> Traefik
-    Traefik -->|/api/* (Direct Streaming)| APIServer
-    Traefik -->|/mcp/*| MCPServer
-    Traefik -->|/*| Browser
+    Clients --> Nginx
+    Nginx -->|/api/* (Direct Streaming)| APIServer
+    Nginx -->|/mcp/*| MCPServer
+    Nginx -->|/*| Browser
 
     %% API Server to Search Interface
     APIServer --> SearchInterface
@@ -58,8 +57,6 @@ flowchart TD
 
     %% API Server Connections
     APIServer --> Postgres
-    APIServer --> CacheStore
-    APIServer --> TaskBroker
     APIServer --> ModelServer
     APIServer --> ExternalLLMs
     APIServer --> ObjectStore
@@ -67,18 +64,35 @@ flowchart TD
 
     %% Background Workers
     CeleryBeat --> TaskBroker
+    APIServer -. "create ingestion job (Sprint 2)" .-> TaskBroker
     TaskBroker --> CeleryWorker
     CeleryWorker --> Postgres
     CeleryWorker --> ModelServer
     CeleryWorker --> ObjectStore
 ```
 
+Redis and the Celery worker are introduced with asynchronous document ingestion, not Sprint 1. Redis is not the browser-session store; no general-purpose cache, lock, or rate-limit responsibility is approved by this architecture.
+
+The diagram includes later-phase components for context. They are not all part of the MVP or Sprint 1.
+
+### Browser authentication and API boundary
+
+The first-party browser application uses opaque server-side sessions. The browser sends the session cookie to the same-origin Nginx reverse proxy, which routes `/api/*` directly to FastAPI and other application routes to Next.js. Cookie-authenticated state-changing requests require CSRF protections and Origin validation. Session cookies are HTTP-only, production Secure, SameSite=Lax, Path=/, and host-only. Passwords use Argon2id. The initial administrator is created through a one-time setup command. Sessions have a 30-minute sliding idle timeout and a 12-hour absolute lifetime; activity never extends the absolute expiry. Expired sessions are invalidated server-side, and logout immediately invalidates the session.
+
+Public registration versus administrator-managed account provisioning remains open. Do not implement public self-registration until that policy is decided.
+
+### Single-tenant MVP
+
+Each initial deployment has one tenant selected by trusted server configuration or setup state; clients cannot choose or override the tenant context. Tenant identifiers may be retained in the data model for future growth, but do not by themselves enforce isolation. RLS is not part of the MVP. Its policy, transaction-bound context, connection-pool reset, and security tests require a separately approved design before implementation.
+
 ---
 
 ## 2. Key Architectural Decisions & The Unified PostgreSQL Design
 
 ### A. The Pluggable `SearchProvider` Interface
-To guarantee that the application can switch from PostgreSQL + `pgvector` to dedicated engines (e.g., OpenSearch or Qdrant) without rewriting chat, RAG, ingestion, or agent workflows, all search operations are mediated by an abstract interface:
+To keep retrieval consumers independent of the current backend and enable future evaluation of other engines, search operations are mediated by an abstract interface. This contract does not make provider migration automatic:
+
+For the single-tenant MVP, `tenant_id` is derived from trusted server-side context and must never be accepted as a client-selected authorization boundary.
 
 ```python
 class SearchProvider(ABC):
@@ -113,7 +127,7 @@ The application ships with **`PgVectorSearchProvider`** as its active default. R
 
 ### B. PostgreSQL Hybrid Retrieval Architecture
 
-Rather than maintaining two distinct databases (Postgres for relational data and OpenSearch for vectors), PostgreSQL 16 handles both paradigms through two complementary extensions:
+Rather than maintaining separate relational and search databases, PostgreSQL 16 combines relational storage, native Full-Text Search, and the `pgvector` extension:
 
 ```mermaid
 flowchart LR
@@ -132,53 +146,55 @@ flowchart LR
     KeywordSearch --> RRF
 
     RRF --> TopPassages["Top Candidate Passages"]
-    TopPassages --> Reranker["Cross-Encoder Reranker\n(Model Server / Cohere)"]
-    Reranker --> FinalResults["Final Context for LLM with Citations"]
+    TopPassages -. "optional extension point; evaluate before enabling" .-> Reranker["Cross-Encoder Reranker"]
+    TopPassages --> FinalResults["Final Context for LLM with Citations"]
+    Reranker -. "only if evaluated and scheduled" .-> FinalResults
 ```
 
 1. **Semantic Vector Search (`pgvector`)**:
-   - Stores dense embeddings (e.g., 1024-dimensional float arrays from BGE-large or 1536-dimensional vectors from OpenAI).
+   - Embedding provider, model, dimension, and versioning strategy are unresolved and must be selected before the embedding schema is implemented.
    - Indexed via **HNSW (Hierarchical Navigable Small World)** with cosine distance operators (`<=>`).
-   - Supports sub-millisecond approximate nearest neighbor lookups within each tenant boundary.
+   - Index settings and latency must be measured; the single-tenant MVP does not establish a multi-tenant boundary.
 2. **Keyword Full-Text Search (FTS)**:
    - Chunks maintain a generated `tsvector` column combining chunk content, document titles, and path metadata.
    - Indexed via **GIN (Generalized Inverted Index)**.
-   - Queries use `websearch_to_tsquery('english', query)` to support natural queries with quotes and boolean operators, scored via `ts_rank_cd`.
+   - Queries use PostgreSQL text-search parsing and ranking (the proposed example uses `websearch_to_tsquery` and `ts_rank_cd`). This is PostgreSQL FTS, not BM25; analyzer choices require evaluation.
 3. **Reciprocal Rank Fusion (RRF)**:
    - Combines vector rankings ($R_{\text{vector}}$) and keyword rankings ($R_{\text{keyword}}$) in SQL using Reciprocal Rank Fusion ($k=60$):
      $$\text{RRF Score} = \frac{1}{60 + R_{\text{vector}}} + \frac{1}{60 + R_{\text{keyword}}}$$
-   - Eliminates the need to normalize incompatible vector cosine distances and BM25/`ts_rank` scores.
-4. **Mandatory Query-Time Security & ACL Filtering**:
-   - Every search query includes mandatory SQL `WHERE` clauses matching `tenant_id` and testing the chunk's `access_control_list` array against the user's email and groups:
+   - Eliminates the need to normalize incompatible vector distances and full-text ranking scores.
+4. **Query-Time Authorization**:
+   - Every search query must enforce the approved user/document access policy before results leave PostgreSQL. The schema's ACL representations are illustrative and inconsistent; resolve the canonical model before search implementation. Tenant identifiers alone are not authorization.
      ```sql
      WHERE tenant_id = :tenant_id
        AND (is_public = true 
             OR user_email = :current_user_email 
             OR group_id = ANY(:current_user_group_ids))
      ```
-5. **Cross-Encoder Reranking**:
-   - The top 50 candidates returned by RRF are sent to the dedicated cross-encoder model server, producing high-precision relevance scores before context window packing.
+5. **Optional Reranking Extension Point**:
+   - Keep the retrieval flow extensible between candidate retrieval and context packing. Do not run a cross-encoder in the MVP until evaluation demonstrates value or it is explicitly scheduled.
 
 ---
 
 ### C. Eliminating the Double-Proxy Streaming Bottleneck
-The edge reverse proxy (Traefik / Nginx) routes `/api/*` **directly to FastAPI**, while routing static assets and SSR pages to Next.js. Server-Sent Events (SSE) stream straight from FastAPI to the browser without intermediate Node.js buffering, cutting memory overhead by > 60%.
+The approved edge reverse proxy is Nginx. It routes same-origin `/api/*` **directly to FastAPI**, while routing frontend pages and assets to Next.js. Server-Sent Events (SSE) stream straight from FastAPI to the browser without an intermediate Next.js API proxy. Any latency or resource benefit must be measured rather than assumed.
 
 ---
 
 ## 3. Scalability Boundaries & Future Migration Triggers
 
-PostgreSQL with `pgvector` provides a resilient, highly capable, and operationally simple foundation. However, dedicated search engines (OpenSearch or Qdrant) may be warranted under specific enterprise scaling conditions.
+PostgreSQL with `pgvector` provides the approved initial foundation. Any future dedicated search engine (OpenSearch or Qdrant) requires measured evidence, a migration plan, and a separately approved decision.
 
 ### Expected Performance of PostgreSQL + pgvector:
-- **Up to 1,000,000 chunks**: Sub-100 ms hybrid search latency with HNSW indexing.
-- **1,000,000 to 3,000,000 chunks**: 100–300 ms latency with properly sized PostgreSQL `shared_buffers` and `work_mem`.
+- Existing latency and corpus estimates are hypotheses, not guaranteed performance. Validate them using a defined benchmark corpus, hardware profile, concurrency, and percentile methodology before treating them as targets or migration triggers.
 - **Single Database Simplicity**: Backups (`pg_dump` / WAL-G), ACID transactions, point-in-time recovery, and zero cross-database synchronization lag.
 
-### Measurable Triggers for Migrating to OpenSearch or Qdrant:
+### Proposed Evaluation Prompts for a Future Provider Review
+The numeric values below are unvalidated prompts for future measurement, not approved migration triggers or service guarantees.
+
 1. **Corpus Volume Threshold**: The total chunk volume exceeds **3,000,000 chunks** per PostgreSQL cluster node.
 2. **Memory Saturation**: HNSW vector indices exceed 70% of available server RAM, causing cache evictions for standard relational queries.
 3. **Query Concurrency SLA**: Sustained search query load exceeds **50 QPS** with p95 search latency exceeding **300 ms**.
 4. **Advanced Linguistics Requirements**: Need for advanced language-specific analyzers, custom tokenizers, synonym dictionaries, and phonetic algorithms (e.g., Kuromoji for Japanese or ICU tokenizers) beyond standard PostgreSQL text dictionaries.
 
-When any of these conditions are met, a dedicated search provider (e.g., `OpenSearchSearchProvider` or `QdrantSearchProvider`) can be activated by changing a single configuration key (`SEARCH_PROVIDER=opensearch`), leaving all core application logic completely untouched.
+These proposed scale triggers prompt evaluation only; they do not automatically select a new provider. A provider change requires reindexing and operational and security review.

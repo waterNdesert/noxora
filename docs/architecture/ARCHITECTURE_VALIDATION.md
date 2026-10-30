@@ -11,12 +11,12 @@ The architecture was evaluated across five rigorous engineering dimensions: **co
 ### Executive Summary
 **Approved initial search architecture:** PostgreSQL 16+ with `pgvector` and PostgreSQL Full-Text Search (FTS), accessed through the `SearchProvider` contract. OpenSearch and Qdrant are possible future providers only; they are not part of the approved implementation.
 
-**Assessment: ARCHITECTURE IS SOUND AND VIABLE**, with marked improvements over Onyx in:
-1. **Infrastructure Footprint**: Removing OpenSearch cuts baseline idle memory from 16 GB to < 4 GB RAM, eliminating a separate JVM cluster and eliminating eventual consistency sync lag.
-2. **Streaming Latency**: Direct reverse proxy routing from Traefik/Nginx to FastAPI bypasses the Node.js duplex streaming bottleneck identified in Onyx.
-3. **Pluggable Architecture**: The `SearchProvider` contract ensures that if chunk volumes exceed PostgreSQL thresholds (e.g., > 3M chunks), switching to OpenSearch or Qdrant requires zero changes to RAG, chat, or agent modules.
+**Assessment: APPROVED FOUNDATION DIRECTION; implementation details remain staged**, including:
+1. **Infrastructure**: PostgreSQL consolidates relational and initial search storage; actual resource requirements remain to be measured.
+2. **Browser/API boundary**: Same-origin reverse-proxy routing sends API and SSE requests directly to FastAPI, avoiding a Next.js API-proxy hop.
+3. **Pluggable Architecture**: The `SearchProvider` contract provides a boundary for evaluating future providers. Switching engines still requires migration, reindexing, operational planning, and security review.
 
-Several technical choices regarding **pgvector HNSW tuning, RLS connection pooling, and multilingual FTS** remain open and must be resolved before implementing retrieval or tenant isolation.
+Several technical choices regarding **pgvector HNSW tuning, the canonical document ACL model, and multilingual FTS** remain open and must be resolved before implementing retrieval. RLS and tenant connection-pool handling remain open for future enterprise isolation, not MVP implementation.
 
 ---
 
@@ -37,7 +37,7 @@ Several technical choices regarding **pgvector HNSW tuning, RLS connection pooli
 ---
 
 ### 2.2. Reciprocal Rank Fusion (RRF) Implementation
-- **Confirmed Strength**: The SQL Common Table Expression (CTE) combining top-100 vector matches and top-100 keyword matches using $1 / (60 + \text{rank})$ avoids normalizing incompatible cosine distances and BM25 scores.
+- **Confirmed Strength**: The proposed SQL Common Table Expression (CTE) combines vector and PostgreSQL full-text result ranks using $1 / (60 + \text{rank})$, avoiding the need to normalize incompatible distance and ranking scores. The candidate limits and settings require retrieval evaluation.
 - **Identified Gap / Assumption**:
   - The default `hnsw.ef_search` parameter in `pgvector` is `40`. If the CTE requests `LIMIT 100`, HNSW will only explore 40 candidates by default, returning fewer than 100 items or truncating recall.
   - *Candidate setting to benchmark*: The search implementation may need to set `hnsw.ef_search` in a transaction before querying, for example:
@@ -56,19 +56,21 @@ Several technical choices regarding **pgvector HNSW tuning, RLS connection pooli
 
 ---
 
-### 2.4. Row-Level Security (RLS) & Multi-Tenant Isolation
-- **Schema-supporting measure, not an isolation guarantee**: Mandatory `tenant_id` fields on operational tables support tenant scoping but do not by themselves ensure strict data isolation.
-- Tenant-scoped reads and writes must enforce tenant identity in application queries and must not leak tenant context across pooled connections. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before tenant isolation is implemented.
+### 2.4. Single-Tenant MVP and Future Multi-Tenant Isolation
+- The MVP is one tenant per deployment. Tenant context is selected and enforced server-side; clients cannot choose it.
+- Tenant identifiers in the proposed schema support future evolution but do not provide isolation.
+- RLS is not part of the MVP. Its policy, transaction-bound context, pooled-connection reset, and security tests require a separately approved design before implementation.
 
 ---
 
 ### 2.5. Permission Hierarchy (Tenant, Workspace, Document & Chunk)
-- **Confirmed Architecture**:
+- **Proposed concepts, not an approved enforcement model**:
   - Tenant Level: Tenant identifiers are present in the proposed data model; they are not, on their own, an isolation guarantee.
   - Group Level: `user_groups` and `user_group_members`.
   - Document Level: `document_access` junction table.
   - Chunk Level: `access_control_list TEXT[]` array on `document_chunks`.
-- **Open question**:
+- **Open questions**:
+  - The canonical representation and enforcement path for document permissions is unresolved. Do not combine the proposed ACL array and `document_access` table as if their semantics were already consistent.
   - The concept of "Workspace" (a collaborative project sub-boundary within a tenant) was cited in requirements but omitted from the initial DDL.
   - A workspace table and related foreign keys are one possible design. Confirm whether workspace-level permissions are an MVP requirement before adding them.
 
@@ -82,23 +84,21 @@ Several technical choices regarding **pgvector HNSW tuning, RLS connection pooli
     DELETE FROM document_chunks WHERE tenant_id = :t AND document_id = :d;
     INSERT INTO document_chunks (...) VALUES (...);
     ```
-  - Because all chunks reside in PostgreSQL (unlike the dual Postgres/OpenSearch setup in Onyx), this atomic delete-and-replace executes in a single transaction with zero downtime.
+  - Because search data resides in PostgreSQL, a delete-and-replace can be atomic when performed in one transaction. Implementation must preserve this consistency; zero downtime is not assumed without measurement.
 
 ---
 
 ### 2.7. Background Processing (Celery & Redis)
-- **Confirmed Architecture**: Partitioned queues (`ingestion`, `connectors`, `pruning`, `default`).
-- **Resilience Requirement**:
-  - Redis broker must be configured with append-only file persistence (`appendonly yes`) so enqueued tasks survive Redis container restarts.
-  - Celery workers must specify `--max-tasks-per-child=100` to prevent memory leaks during heavy PDF parsing with `pypdf`/`pdfminer`.
+- **Approved timing and purpose**: Introduce Celery and Redis when document upload/ingestion is implemented, currently Sprint 2. Neither is required in Sprint 1.
+- The ingestion workflow must expose processing status, report failures, and retry according to a defined policy.
+- Broker persistence, recovery, idempotency, and retry configuration must be decided before ingestion deployment; proposed settings are not approved requirements.
 
 ---
 
 ### 2.8. Secret Encryption & Key Management
-- **Confirmed Architecture**: AES-GCM 256-bit encryption for stored credentials.
-- **Security Requirement**:
-  - The 32-byte encryption key must be derived from `ENCRYPTION_KEY_SECRET` using a standard Key Derivation Function (HKDF or PBKDF2 with SHA-256) rather than raw string truncation.
-  - Nonces (Initialization Vectors / IVs) must be generated uniquely using `os.urandom(12)` for every single encryption operation and stored alongside the ciphertext.
+- The current credential-encryption proposal applies to connector credentials, not browser sessions or provider API keys.
+- Provider API keys must not be persisted until their configuration and secure-storage approach are approved.
+- Encryption key derivation and nonce handling must be reviewed before connector-credential storage is implemented; the existing AES-GCM notes are security guidance, not a Sprint 1 requirement.
 
 ---
 
@@ -111,10 +111,19 @@ The following items were identified during validation. They are not silently tre
 2. **HNSW and FTS query settings**:
    - Candidate settings include `SET LOCAL hnsw.ef_search = 100` and an unstemmed `'simple'` text search path for code and technical acronyms.
    - Open question: benchmark and approve search settings when implementing retrieval; do not assume these values are accepted production settings.
-3. **Tenant context handling for connection pools**:
-   - Decide and test the RLS policy, transaction-bound context-setting mechanism, and pool reset strategy before tenant isolation is implemented.
-4. **OAuth delivery sequence**:
-   - The MVP scope includes Google/GitHub OAuth, while the roadmap's Sprint 1 describes local authentication and does not assign OAuth to a later sprint. Confirm the OAuth scope and sprint before making an MVP delivery commitment.
+3. **Future tenant isolation**:
+   - Decide and test the RLS policy, transaction-bound context-setting mechanism, and pool reset strategy before enterprise tenant isolation is implemented. These are not MVP requirements.
+4. **Account provisioning and password recovery**:
+   - Decide whether accounts after the one-time administrator bootstrap are created through public registration or administrator-managed provisioning, and define password reset behavior before implementing those flows.
+   - **Approved session lifecycle**: 30-minute sliding idle timeout and 12-hour absolute lifetime; the absolute expiry never extends. Expired sessions are invalidated server-side, and logout immediately invalidates the session.
+5. **OAuth details**:
+   - Google and GitHub OAuth are MVP requirements, scheduled for Sprint 5. Decide account-linking and verified-email behavior before implementing provider flows.
+6. **Provider-key configuration**:
+   - Decide whether MVP LLM provider access comes from deployment configuration or an administrative workflow. Do not persist provider keys until secure storage is approved.
+7. **Document access-control model**:
+   - The proposed architecture and database schema use inconsistent ACL representations. Resolve the canonical model before search implementation.
+8. **Object storage and ingestion reliability**:
+   - Select the local and production object-storage provider and define deletion/retention behavior before upload implementation. Define Celery/Redis broker persistence, idempotency, and retry behavior before deploying ingestion workers.
 
 ---
 
@@ -122,27 +131,26 @@ The following items were identified during validation. They are not silently tre
 
 | Issue | Resolution Target | Why It Can Wait |
 | :--- | :--- | :--- |
-| **OpenSearch / Qdrant Adapter Code** | Phase 5 / Post-MVP | `SearchProvider` interface is defined; Postgres handles < 3M chunks easily. |
-| **SAML 2.0 XML Certificate Validation** | Sprint 15 (Phase 5) | Local JWT and OAuth2 cover all MVP and early testing needs. |
-| **Python Code Sandbox gVisor Hardening** | Sprint 11 (Phase 3) | Basic Docker container with dropped capabilities suffices for initial tool testing. |
-| **Stripe Billing & Seat Webhooks** | Sprint 18 (Phase 5) | Commercial licensing is not needed for internal product development. |
-| **Scalar Vector Quantization (SQ)** | Post-MVP (> 1M chunks) | Uncompressed 1024-dim vectors fit easily in RAM for datasets under 500,000 chunks. |
+| **OpenSearch / Qdrant Adapter Code** | Future evaluation / Post-MVP | No dedicated search dependency is approved; evaluate alternatives only against measured requirements. |
+| **SAML 2.0 XML Certificate Validation** | Sprint 16 (Phase 5) | Local sessions and MVP OAuth cover the initial application; enterprise SSO is later scope. |
+| **Python Code Sandbox gVisor Hardening** | Sprint 12 (Phase 3) | Code execution is not part of the MVP. |
+| **Stripe Billing & Seat Webhooks** | Sprint 19 (Phase 5) | Commercial licensing is not needed for internal product development. |
+| **Scalar Vector Quantization (SQ)** | Post-MVP, if required | Embedding dimensions and workload are not yet selected; consider quantization only if measured memory requirements justify it. |
 
 ---
 
 ## 5. Security & Infrastructure Summary
 
 ### Security Baseline:
-- **Transport**: TLS 1.3 at edge; HTTP-only, `SameSite=Lax`, signed JWT cookies.
-- **Storage**: AES-GCM 256 credential encryption with unique 12-byte IVs.
-- **Authorization**: Mandatory tenant ID and ACL array overlap (`&&`) filtering in SQL before results leave PostgreSQL.
-- **CORS & CSP**: Strict frame-ancestors preventing clickjacking; locked CORS origin headers.
+- **Transport and browser auth**: Same-origin reverse-proxy routing; opaque server-side sessions; HTTP-only, production Secure, `SameSite=Lax`, `Path=/`, host-only cookies; CSRF protections and Origin validation.
+- **Passwords and sessions**: Argon2id password hashing; store session secrets only as hashes; invalidate sessions on logout and relevant account/password security changes.
+- **Provider and connector secrets**: Do not persist provider API keys until configuration and secure storage are approved. Evaluate connector-secret encryption before connector implementation.
+- **Authorization**: Enforce user/document access policy before search results leave PostgreSQL. Tenant IDs alone do not provide isolation; MVP is single-tenant and does not implement RLS.
+- **CORS & CSP**: Restrict origins and frame embedding according to deployment requirements.
 
-### Infrastructure Baseline for Sprint 1 (Docker Compose):
-- **PostgreSQL 16**: Using `pgvector/pgvector:pg16` image.
-  - Recommended memory: 4 GB RAM assigned to container.
-  - Postgres configs: `shared_buffers = 1GB`, `work_mem = 64MB`, `maintenance_work_mem = 512MB`.
-- **Redis 7**: Using `redis:7-alpine` with AOF persistence.
+### Infrastructure Baseline for Sprint 1:
+- **PostgreSQL 16+ with pgvector available**. Confirm the image and extension compatibility when implementation begins; do not assume resource settings from the earlier proposal are validated requirements.
+- **Redis and Celery are excluded from Sprint 1** and introduced with asynchronous document ingestion.
 - **Python Backend**: Python 3.13 on Debian slim.
 - **Web Frontend**: Node.js 22 LTS / Next.js 16.
 
@@ -152,4 +160,4 @@ The following items were identified during validation. They are not silently tre
 
 ### **VERDICT: APPROVED FOUNDATION DIRECTION; IMPLEMENT IN STAGES**
 
-The approved foundation direction uses PostgreSQL + pgvector and PostgreSQL FTS, with no OpenSearch dependency. Sprint 1 foundation work can proceed within its roadmap scope. See the [roadmap](../development/ROADMAP.md) and [Sprint 1 foundation plan](../sprints/SPRINT_01_FOUNDATION_PLAN.md). Resolve each open question before implementing the feature or schema work that depends on it.
+The approved initial search direction uses PostgreSQL + pgvector and PostgreSQL FTS, with no OpenSearch dependency. Sprint 1 is in progress. Follow the [roadmap](../development/ROADMAP.md) and [Sprint 1 foundation plan](../sprints/SPRINT_01_FOUNDATION_PLAN.md); resolve open questions before implementing the feature or schema work that depends on them.
