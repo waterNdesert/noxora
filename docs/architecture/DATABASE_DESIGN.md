@@ -192,6 +192,7 @@ CREATE TABLE document_chunks (
         to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, ''))
     ) STORED,
     -- Dense Vector Embedding (e.g. 1024-dim BGE-large or 1536-dim OpenAI)
+    -- OPEN DECISION: embedding model/dimension unresolved; VECTOR(1024) is illustrative only.
     embedding VECTOR(1024),
     source_type VARCHAR(64) NOT NULL,
     source_url TEXT,
@@ -231,8 +232,6 @@ CREATE TABLE document_access (
     FOREIGN KEY (tenant_id, document_id) REFERENCES documents(tenant_id, id) ON DELETE CASCADE
 );
 ```
-
-> **Open decision:** The schema currently shows `VECTOR(1024)`, while the architecture also discusses embedding providers with other output dimensions. Confirm the selected embedding model and dimension before implementing the schema. Do not treat 1024 as approved solely because it appears in this example.
 
 ---
 

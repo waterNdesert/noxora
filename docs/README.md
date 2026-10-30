@@ -1,26 +1,40 @@
-# Enterprise AI Knowledge Platform — Development Foundation
+# Nexora Documentation
 
-This directory contains the production-ready architecture design, technology evaluation, directory structure, database schemas, development roadmap, MVP scope, architecture decision records (ADRs), and final validation report for building an enterprise-grade AI knowledge intelligence and autonomous agent platform.
+Nexora is an independent AI knowledge assistant project. Its approved product and architecture documents are authoritative; Onyx material is retained only as historical reference research.
 
-The architecture features a unified **PostgreSQL 16+ data store utilizing `pgvector` and Full-Text Search (FTS)** for hybrid retrieval, shielded behind an abstract `SearchProvider` interface for seamless future scalability.
+## Documentation map
 
----
+- [`architecture/`](architecture/) — Nexora product architecture, approved stack and decisions, database proposal, MVP scope, and architecture validation.
+- [`development/`](development/) — development guidelines and the single current roadmap.
+- [`sprints/`](sprints/) — sprint-specific plans. The Sprint 1 plan is not a declaration that implementation has started.
+- [`archive/onyx-reference/`](archive/onyx-reference/) — preserved research about the separate Onyx product. These documents describe Onyx and are not Nexora requirements.
 
-## Planning Documents Index
+## Authoritative Nexora documents
 
-| Document | Description |
-| :--- | :--- |
-| **[application-architecture.md](file:///home/water/Downloads/onyx-app-plan/application-architecture.md)** | Production-ready architecture design, unified PostgreSQL hybrid search, pluggable `SearchProvider` interface, and performance limits. |
-| **[technology-stack.md](file:///home/water/Downloads/onyx-app-plan/technology-stack.md)** | Technology recommendations, evaluation of PostgreSQL + `pgvector` vs. OpenSearch/Qdrant, operational complexity, and fit. |
-| **[project-directory-structure.md](file:///home/water/Downloads/onyx-app-plan/project-directory-structure.md)** | Complete monorepo layout for `backend/`, `web/`, `services/`, and `deployment/` with the pluggable retrieval provider structure. |
-| **[initial-database-design.md](file:///home/water/Downloads/onyx-app-plan/initial-database-design.md)** | PostgreSQL 16+ schema with `pgvector` HNSW index, FTS GIN index, `document_chunks` table, RRF CTE SQL query, and indexes. |
-| **[development-roadmap.md](file:///home/water/Downloads/onyx-app-plan/development-roadmap.md)** | Actionable 5-phase, 18-sprint development roadmap updated for PostgreSQL + `pgvector` hybrid search delivery. |
-| **[mvp-scope.md](file:///home/water/Downloads/onyx-app-plan/mvp-scope.md)** | Boundaries of the Minimum Viable Product (MVP), user journey, lean 8 GB RAM topology, and success metrics. |
-| **[architecture-decisions.md](file:///home/water/Downloads/onyx-app-plan/architecture-decisions.md)** | Architecture Decision Records (ADRs 001–007) detailing the unified Postgres search choice and data-driven migration triggers. |
-| **[09-final-architecture-validation.md](file:///home/water/Downloads/onyx-app-plan/09-final-architecture-validation.md)** | **Final Architecture Validation & Readiness Assessment**: Technical review across security, consistency, pgvector HNSW limits, and Sprint 1 go/no-go recommendation. |
+- [Architecture](architecture/ARCHITECTURE.md)
+- [Technology stack](architecture/TECHNOLOGY_STACK.md)
+- [Architecture decisions](architecture/ARCHITECTURE_DECISIONS.md)
+- [Database design](architecture/DATABASE_DESIGN.md)
+- [MVP scope](architecture/MVP_SCOPE.md)
+- [Architecture validation and open questions](architecture/ARCHITECTURE_VALIDATION.md)
+- [Development guidelines](development/DEVELOPMENT_GUIDELINES.md)
+- [Development roadmap](development/ROADMAP.md)
+- [Sprint 1 foundation plan](sprints/SPRINT_01_FOUNDATION_PLAN.md)
+- [Copilot instructions](../.github/copilot-instructions.md)
 
----
+`ARCHITECTURE_DECISIONS.md` records approved decisions. `ARCHITECTURE_VALIDATION.md` records constraints, caveats, and unresolved questions. If a detail is unresolved, do not infer an implementation choice.
 
-## Verification & Status
+## Read first
 
-All documents reflect the updated PostgreSQL + `pgvector` hybrid retrieval architecture, eliminating OpenSearch as a mandatory dependency while preserving full RAG, citation, ACL filtering, and ranking capabilities.
+AI coding assistants should read, in order:
+
+1. This index and the repository [README](../README.md).
+2. [Development guidelines](development/DEVELOPMENT_GUIDELINES.md) and [Copilot instructions](../.github/copilot-instructions.md).
+3. [MVP scope](architecture/MVP_SCOPE.md), [architecture](architecture/ARCHITECTURE.md), [stack](architecture/TECHNOLOGY_STACK.md), and [architecture decisions](architecture/ARCHITECTURE_DECISIONS.md).
+4. [Database design](architecture/DATABASE_DESIGN.md) and [architecture validation](architecture/ARCHITECTURE_VALIDATION.md) before database or tenancy work.
+5. [Roadmap](development/ROADMAP.md) and the specific sprint plan before implementing sprint work.
+6. Onyx reference material only when it answers a specific research question.
+
+## Link and authority conventions
+
+Internal links should be relative to the containing Markdown file and resolve within this repository. Open questions must be labeled explicitly. The approved initial search design is PostgreSQL + pgvector + PostgreSQL FTS; OpenSearch appears only in Onyx research or as a possible future provider, not as a current Nexora dependency.

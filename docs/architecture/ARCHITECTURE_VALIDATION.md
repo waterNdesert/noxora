@@ -1,6 +1,6 @@
 # Final Technical Architecture Validation & Readiness Assessment
 
-This document provides a comprehensive technical review of the 8 foundational architecture and planning documents for the new enterprise knowledge platform in `/home/water/Downloads/onyx-app-plan/`. 
+This document records the validation of Nexora's foundational architecture and planning documents.
 
 The architecture was evaluated across five rigorous engineering dimensions: **completeness**, **consistency**, **security**, **scalability**, and **implementation feasibility**.
 
@@ -16,7 +16,7 @@ The architecture was evaluated across five rigorous engineering dimensions: **co
 2. **Streaming Latency**: Direct reverse proxy routing from Traefik/Nginx to FastAPI bypasses the Node.js duplex streaming bottleneck identified in Onyx.
 3. **Pluggable Architecture**: The `SearchProvider` contract ensures that if chunk volumes exceed PostgreSQL thresholds (e.g., > 3M chunks), switching to OpenSearch or Qdrant requires zero changes to RAG, chat, or agent modules.
 
-However, several critical technical nuances regarding **pgvector HNSW tuning, RLS connection pooling, and multi-lingual FTS** must be formalized before Sprint 1 begins.
+Several technical choices regarding **pgvector HNSW tuning, RLS connection pooling, and multilingual FTS** remain open and must be resolved before implementing retrieval or tenant isolation.
 
 ---
 
@@ -25,14 +25,14 @@ However, several critical technical nuances regarding **pgvector HNSW tuning, RL
 ### 2.1. PostgreSQL Hybrid Search (`pgvector` + FTS)
 - **Confirmed Strength**: Combining `pgvector` HNSW vector distance with PostgreSQL's built-in `tsvector` / `tsquery` in a single database guarantees atomic updates, ACID transactionality on document deletions, and zero cross-system data drift.
 - **Identified Gap / Assumption**:
-  - In `initial-database-design.md`, the generated `tsv_content` column is hardcoded to `'english'`:
+  - In the proposed [database design](DATABASE_DESIGN.md), the generated `tsv_content` column uses `'english'`:
     ```sql
     tsv_content TSVECTOR GENERATED ALWAYS AS (
         to_tsvector('english', coalesce(title, '') || ' ' || coalesce(content, ''))
     ) STORED
     ```
   - *Risk*: Code snippets, stack traces, URLs, acronyms, and non-English documents (German, French, Spanish, Japanese) will be incorrectly stemmed by the English Snowball dictionary.
-  - *Required Fix for Sprint 2*: Add dual `tsvector` columns or use `'simple'` analyzer alongside `'english'` so unstemmed exact tokens (e.g. `ERR_CONN_RESET`, `v24.22.2`) are preserved.
+  - *Open follow-up for retrieval work*: Evaluate an unstemmed `'simple'` analyzer alongside `'english'` for code, acronyms, and non-English content. The final analyzer strategy remains undecided.
 
 ---
 
@@ -40,37 +40,37 @@ However, several critical technical nuances regarding **pgvector HNSW tuning, RL
 - **Confirmed Strength**: The SQL Common Table Expression (CTE) combining top-100 vector matches and top-100 keyword matches using $1 / (60 + \text{rank})$ avoids normalizing incompatible cosine distances and BM25 scores.
 - **Identified Gap / Assumption**:
   - The default `hnsw.ef_search` parameter in `pgvector` is `40`. If the CTE requests `LIMIT 100`, HNSW will only explore 40 candidates by default, returning fewer than 100 items or truncating recall.
-  - *Required Fix for Sprint 2*: The database connection pool initialization or search query preamble must explicitly execute:
+  - *Candidate setting to benchmark*: The search implementation may need to set `hnsw.ef_search` in a transaction before querying, for example:
     ```sql
     SET LOCAL hnsw.ef_search = 100;
     ```
 
 ---
 
-### 2.3. HNSW Indexing Configuration & Memory Sizing
-- **Confirmed Parameters**: `m = 16, ef_construction = 64` on `embedding vector_cosine_ops`.
+### 2.3. Candidate HNSW Configuration & Memory Sizing
+- **Proposed schema values, not benchmark-validated**: `m = 16, ef_construction = 64` on `embedding vector_cosine_ops`.
 - **Benchmarking Need**:
-  - Vector dimensionality matters: 1024 dimensions (e.g., BAAI/bge-large) consumes ~4 KB per chunk. One million chunks require ~4.5 GB of RAM solely for the HNSW graph.
-  - For high-recall enterprise search (> 95% top-5 recall), `ef_construction` should be increased to `128` during index creation.
+  - Vector dimensionality matters: a 1024-dimensional vector (for example, one possible BGE model configuration) uses about 4 KB per vector before index overhead. The selected model/dimension is unresolved.
+  - `ef_construction = 128` is a candidate to benchmark if high recall is required; it is not an approved value.
   - PostgreSQL's `maintenance_work_mem` must be sized to at least `1 GB` to prevent HNSW index creation from swapping to disk during initial ingestion.
 
 ---
 
 ### 2.4. Row-Level Security (RLS) & Multi-Tenant Isolation
-- **Confirmed Strength**: Mandatory `tenant_id` on all operational tables ensures strict data isolation.
+- **Schema-supporting measure, not an isolation guarantee**: Mandatory `tenant_id` fields on operational tables support tenant scoping but do not by themselves ensure strict data isolation.
 - Tenant-scoped reads and writes must enforce tenant identity in application queries and must not leak tenant context across pooled connections. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before tenant isolation is implemented.
 
 ---
 
 ### 2.5. Permission Hierarchy (Tenant, Workspace, Document & Chunk)
 - **Confirmed Architecture**:
-  - Tenant Level: Strict tenant boundaries.
+  - Tenant Level: Tenant identifiers are present in the proposed data model; they are not, on their own, an isolation guarantee.
   - Group Level: `user_groups` and `user_group_members`.
   - Document Level: `document_access` junction table.
   - Chunk Level: `access_control_list TEXT[]` array on `document_chunks`.
-- **Architectural Adjustment**:
+- **Open question**:
   - The concept of "Workspace" (a collaborative project sub-boundary within a tenant) was cited in requirements but omitted from the initial DDL.
-  - *Required Addition*: Add `workspaces` table (`id, tenant_id, name, created_at`) and optional `workspace_id` foreign keys on `documents` and `chat_sessions`.
+  - A workspace table and related foreign keys are one possible design. Confirm whether workspace-level permissions are an MVP requirement before adding them.
 
 ---
 
@@ -102,16 +102,19 @@ However, several critical technical nuances regarding **pgvector HNSW tuning, RL
 
 ---
 
-## 3. Issues That Must Be Resolved Before Sprint 1 Begins
+## 3. Open Questions and Validation Follow-Ups
 
-The following 3 items must be updated in the planning documentation before starting development:
+The following items were identified during validation. They are not silently treated as resolved decisions:
 
-1. **Add `workspaces` Entity to Database Design**:
-   - Introduce `workspaces (id, tenant_id, name, created_at)` and link to `documents` and `chat_sessions` so workspace-level permissions are supported from the start.
-2. **Explicit HNSW and FTS Query Settings**:
-   - Formalize `SET LOCAL hnsw.ef_search = 100;` and unstemmed `'simple'` text search fallback for code and technical acronyms.
-3. **Tenant Context Handling for Connection Pools**:
+1. **Workspace entity and scope**:
+   - Open question: confirm whether workspace-level permissions belong in the MVP before adding a workspace table and related foreign keys.
+2. **HNSW and FTS query settings**:
+   - Candidate settings include `SET LOCAL hnsw.ef_search = 100` and an unstemmed `'simple'` text search path for code and technical acronyms.
+   - Open question: benchmark and approve search settings when implementing retrieval; do not assume these values are accepted production settings.
+3. **Tenant context handling for connection pools**:
    - Decide and test the RLS policy, transaction-bound context-setting mechanism, and pool reset strategy before tenant isolation is implemented.
+4. **OAuth delivery sequence**:
+   - The MVP scope includes Google/GitHub OAuth, while the roadmap's Sprint 1 describes local authentication and does not assign OAuth to a later sprint. Confirm the OAuth scope and sprint before making an MVP delivery commitment.
 
 ---
 
@@ -147,9 +150,6 @@ The following 3 items must be updated in the planning documentation before start
 
 ## 6. Final Recommendation
 
-### **VERDICT: READY FOR IMPLEMENTATION (APPROVED FOR SPRINT 1)**
+### **VERDICT: APPROVED FOUNDATION DIRECTION; IMPLEMENT IN STAGES**
 
-The architecture is technically complete, internally consistent, well-bounded, and eliminates the operational complexity of OpenSearch while preserving full hybrid retrieval (vector + keyword + RRF + cross-encoder reranking).
-
-Once the 3 minor items in Section 3 are approved, the engineering team can proceed immediately to **Sprint 1: Base Architecture, Database & Authentication** from [`development-roadmap.md`](file:///home/water/Downloads/onyx-app-plan/development-roadmap.md).
-
+The approved foundation direction uses PostgreSQL + pgvector and PostgreSQL FTS, with no OpenSearch dependency. Sprint 1 foundation work can proceed within its roadmap scope. See the [roadmap](../development/ROADMAP.md) and [Sprint 1 foundation plan](../sprints/SPRINT_01_FOUNDATION_PLAN.md). Resolve each open question before implementing the feature or schema work that depends on it.
