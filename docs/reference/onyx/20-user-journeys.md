@@ -1,6 +1,6 @@
 # Major User Journeys & End-to-End Code Traces
 
-This document traces the 12 core user journeys through Onyx, following execution flow across the frontend, Next.js proxy, FastAPI API server, Celery background workers, PostgreSQL, and OpenSearch.
+This document traces six core user journeys through Onyx, following execution flow across the frontend, Next.js proxy, FastAPI API server, Celery background workers, PostgreSQL, and OpenSearch.
 
 ---
 

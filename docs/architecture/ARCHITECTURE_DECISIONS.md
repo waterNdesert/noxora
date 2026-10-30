@@ -11,6 +11,8 @@ This document records the foundational architectural decisions, rationale, alter
 Enterprise workplace search requires retrieving documents through both semantic intent (conceptual synonyms) and exact keyword matches (acronyms, code identifiers, employee names, exact error codes), while enforcing strict tenant and user access control lists (ACLs). Requiring OpenSearch for initial deployment adds severe operational overhead: a dedicated Java Virtual Machine (JVM) cluster (4–8 GB heap), circuit breaker tuning, separate backups, and dual-database eventual consistency lag.
 
 ### Decision:
+**Approved initial search architecture:** PostgreSQL 16+ with `pgvector` and PostgreSQL Full-Text Search (FTS), accessed through the `SearchProvider` contract. OpenSearch and Qdrant are possible future providers only; they are not part of the approved implementation.
+
 1. Deploy **PostgreSQL 16+ with the `pgvector` extension and Full-Text Search (FTS)** as the unified data store for both relational metadata and hybrid search.
 2. Abstract all search, indexing, and deletion operations behind an abstract **`SearchProvider`** interface, with **`PgVectorSearchProvider`** as the default implementation.
 3. Use HNSW indexing on vector embeddings (`vector_cosine_ops`) and GIN indexing on generated `tsvector` columns, combining rankings via **Reciprocal Rank Fusion (RRF)** in a single SQL query.
@@ -77,6 +79,8 @@ Implement a dual SQLAlchemy 2.0 engine architecture:
 ### Consequences:
 - **Positive**: Prevents event loop blocking during chat streaming while preserving thread safety in background workers.
 - **Negative**: Requires maintaining async and sync session factory helpers.
+
+Tenant-scoped reads and writes must enforce tenant identity in application queries and must not leak tenant context across pooled connections. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before tenant isolation is implemented.
 
 ---
 

@@ -9,7 +9,7 @@ The architecture was evaluated across five rigorous engineering dimensions: **co
 ## 1. Overall Architecture Assessment
 
 ### Executive Summary
-The revised architecture replaces OpenSearch with a **unified PostgreSQL 16+ engine utilizing `pgvector` and Full-Text Search (FTS)**, shielded behind an abstract `SearchProvider` interface. 
+**Approved initial search architecture:** PostgreSQL 16+ with `pgvector` and PostgreSQL Full-Text Search (FTS), accessed through the `SearchProvider` contract. OpenSearch and Qdrant are possible future providers only; they are not part of the approved implementation.
 
 **Assessment: ARCHITECTURE IS SOUND AND VIABLE**, with marked improvements over Onyx in:
 1. **Infrastructure Footprint**: Removing OpenSearch cuts baseline idle memory from 16 GB to < 4 GB RAM, eliminating a separate JVM cluster and eliminating eventual consistency sync lag.
@@ -58,9 +58,7 @@ However, several critical technical nuances regarding **pgvector HNSW tuning, RL
 
 ### 2.4. Row-Level Security (RLS) & Multi-Tenant Isolation
 - **Confirmed Strength**: Mandatory `tenant_id` on all operational tables ensures strict data isolation.
-- **Identified Security Vulnerability with Connection Pooling**:
-  - The application uses `asyncpg` connection pooling. If tenant isolation relies on session variables (e.g., `SET LOCAL app.current_tenant = :id`), a connection returned to the pool without clean reset could theoretically leak the tenant context to a subsequent user request on another tenant.
-  - *Resolution Requirement*: All SQL queries must enforce `WHERE tenant_id = :tenant_id` at the query builder layer, and RLS policies must use transactional context (`SET LOCAL`) wrapped in strict database transaction scopes.
+- Tenant-scoped reads and writes must enforce tenant identity in application queries and must not leak tenant context across pooled connections. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before tenant isolation is implemented.
 
 ---
 
@@ -112,8 +110,8 @@ The following 3 items must be updated in the planning documentation before start
    - Introduce `workspaces (id, tenant_id, name, created_at)` and link to `documents` and `chat_sessions` so workspace-level permissions are supported from the start.
 2. **Explicit HNSW and FTS Query Settings**:
    - Formalize `SET LOCAL hnsw.ef_search = 100;` and unstemmed `'simple'` text search fallback for code and technical acronyms.
-3. **Session Reset Protocol for `asyncpg` Connection Pools**:
-   - Add explicit requirement that async sessions run queries within transaction blocks or issue `DISCARD ALL` / reset handlers when returning connections to the pool.
+3. **Tenant Context Handling for Connection Pools**:
+   - Decide and test the RLS policy, transaction-bound context-setting mechanism, and pool reset strategy before tenant isolation is implemented.
 
 ---
 

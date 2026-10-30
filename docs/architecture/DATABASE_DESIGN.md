@@ -2,6 +2,8 @@
 
 This document details the relational database schema, core entities, foreign key relationships, multi-tenant partitioning boundaries, and the **unified PostgreSQL 16+ hybrid search schema using `pgvector` and Full-Text Search (FTS)**.
 
+**Approved initial search architecture:** PostgreSQL 16+ with `pgvector` and PostgreSQL Full-Text Search (FTS), accessed through the `SearchProvider` contract. OpenSearch and Qdrant are possible future providers only; they are not part of the approved implementation.
+
 ---
 
 ## 1. Entity Relationship Diagram (ERD)
@@ -39,6 +41,9 @@ erDiagram
 ## 2. Foundational Relational Entities
 
 ### A. Extensions & Multi-Tenancy
+
+Tenant-scoped reads and writes must enforce tenant identity in application queries and must not leak tenant context across pooled connections. The exact RLS policy, transaction-bound context-setting mechanism, and pool reset strategy remain open and must be decided and tested before tenant isolation is implemented.
+
 ```sql
 -- Enable vector search extension
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -226,6 +231,8 @@ CREATE TABLE document_access (
     FOREIGN KEY (tenant_id, document_id) REFERENCES documents(tenant_id, id) ON DELETE CASCADE
 );
 ```
+
+> **Open decision:** The schema currently shows `VECTOR(1024)`, while the architecture also discusses embedding providers with other output dimensions. Confirm the selected embedding model and dimension before implementing the schema. Do not treat 1024 as approved solely because it appears in this example.
 
 ---
 

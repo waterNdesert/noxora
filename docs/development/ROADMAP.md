@@ -1,5 +1,7 @@
 # Actionable Development Roadmap & Sprint Plan
 
+The roadmap lists 18 sequential 14-day sprints (approximately 36 weeks of sprint time, excluding gaps). This is a sequence estimate, not a five-month commitment. Re-estimate dates and staffing before using it as a delivery commitment.
+
 This document converts the architectural blueprint into an actionable engineering delivery plan across 5 execution phases, reflecting the **PostgreSQL 16+ with `pgvector` and Full-Text Search (FTS)** search architecture.
 
 ---

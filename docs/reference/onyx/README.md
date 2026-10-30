@@ -36,7 +36,7 @@ All documentation is maintained independently outside the Onyx source repository
 | :--- | :--- |
 | **[18-complete-feature-inventory.md](file:///home/water/Downloads/onyx-docs/18-complete-feature-inventory.md)** | Comprehensive verified catalog of all Onyx features across AI, Knowledge, Security, and Enterprise tiers. |
 | **[19-feature-implementation-analysis.md](file:///home/water/Downloads/onyx-docs/19-feature-implementation-analysis.md)** | Technical deep-dive for each feature: frontend components, backend modules, database models, and source traces. |
-| **[20-user-journeys.md](file:///home/water/Downloads/onyx-docs/20-user-journeys.md)** | Sequence diagrams and code traces for the 12 core user journeys from signup to administrative auditing. |
+| **[20-user-journeys.md](file:///home/water/Downloads/onyx-docs/20-user-journeys.md)** | Sequence diagrams and code traces for six core user journeys from signup to administrative auditing. |
 | **[21-feature-dependency-map.md](file:///home/water/Downloads/onyx-docs/21-feature-dependency-map.md)** | 5-layer dependency hierarchy map, shared cross-cutting components, and prerequisites for independent implementation. |
 | **[22-full-rebuild-roadmap.md](file:///home/water/Downloads/onyx-docs/22-full-rebuild-roadmap.md)** | 17-stage implementation blueprint specifying features, backend/frontend files, DB models, complexity, and definitions of done. |
 | **[23-technical-requirements.md](file:///home/water/Downloads/onyx-docs/23-technical-requirements.md)** | Hardware sizing, runtime dependencies, network egress rules, SLA latency benchmarks, and compliance standards. |
